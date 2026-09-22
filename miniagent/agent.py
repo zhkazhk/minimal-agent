@@ -142,7 +142,17 @@ class MinimalAgent:
         session = self.session_mgr.get_or_create(session_id)
         run_id = new_id("run")
         started = time.perf_counter()
-        budget = max_tool_turns if max_tool_turns is not None else session.max_turn or self.config.max_tool_turns
+        # 轮次预算优先级：显式参数 > session 上显式设置的覆盖值 > config。
+        # 注意：外部传入的 SessionManager 通常带 max_turn 默认值，它**不应该**悄悄覆盖
+        # config.max_tool_turns（否则配置文件形同虚设）。因此 Session 记录「覆盖值」，
+        # 未显式覆盖时以 config 为准。
+        if max_tool_turns is not None:
+            budget = max_tool_turns
+        elif session.max_turn_override:
+            budget = session.max_turn_override
+        else:
+            budget = self.config.max_tool_turns
+        session.max_turn = budget
 
         session.add_user(user_input)
         self.tracer.log(
@@ -159,6 +169,7 @@ class MinimalAgent:
         result = AgentResult(answer="", session_id=session_id, run_id=run_id)
         tool_turns = 0
         parse_failures = 0
+        limit_rejections = 0
         call_history: list[str] = []
         compressed_any = False
         dropped_any = 0
@@ -228,7 +239,7 @@ class MinimalAgent:
                     result.answer = self.config.llm_error_reply
                     session.add_error(exc.to_observation())
                     session.add_assistant(result.answer, turn=tool_turns)
-                    return self._finish(result, started, session, run_id)
+                    return self._finish(result, started, session, run_id, tool_turns)
 
                 self.tracer.log_llm_response(
                     response.content,
@@ -263,7 +274,7 @@ class MinimalAgent:
                         result.stopped_reason = "parse_failed"
                         result.answer = self.config.parse_error_reply
                         session.add_assistant(result.answer, turn=tool_turns)
-                        return self._finish(result, started, session, run_id)
+                        return self._finish(result, started, session, run_id, tool_turns)
                     continue   # 把错误回灌上下文，让 LLM 修正
 
                 if isinstance(parsed, Answer):
@@ -280,11 +291,10 @@ class MinimalAgent:
                         text=truncate(parsed.content, 300),
                         repaired=parsed.repaired,
                     )
-                    return self._finish(result, started, session, run_id)
+                    return self._finish(result, started, session, run_id, tool_turns)
 
                 # ---------- 分支B：工具调用 ----------
                 assert isinstance(parsed, ToolCall)
-                session.add_tool_call(parsed.tool_name, parsed.arguments, turn=tool_turns)
                 signature = f"{parsed.tool_name}:{safe_json(parsed.arguments)}"
                 call_history.append(signature)
                 self.tracer.log_tool_call(
@@ -294,24 +304,30 @@ class MinimalAgent:
                     run_id=run_id,
                     turn=tool_turns,
                     repaired=parsed.repaired,
+                    executed=not force_final,
                 )
 
                 if force_final:
                     # ---------------- 轮次上限护栏 ----------------
+                    # 关键：被拒绝的调用**不写进 session**，否则上下文里会留下一个永不闭合的
+                    # tool_call（模型下一轮看到会重复调用），而且它会被误计入「解析失败」。
                     note = (
-                        f"已达到工具调用轮次上限（{budget}），本轮不再执行工具 `{parsed.tool_name}`。"
-                        "请立即基于上文已有结果输出最终回答。"
+                        f"已达到工具调用轮次上限（{budget}），本轮不再执行工具 `{parsed.tool_name}`，"
+                        "也没有记录这次调用。请立即基于上文已有结果输出最终回答。"
                     )
                     self.tracer.log("max_turns_reached", level="WARNING", session_id=session_id, run_id=run_id, turn=tool_turns, detail=note)
                     result.errors.append(note)
                     session.add_error(note, name=parsed.tool_name, turn=tool_turns)
-                    parse_failures += 1
-                    if parse_failures > self.config.max_parse_retries:
+                    limit_rejections += 1
+                    if limit_rejections > self.config.max_limit_rejections:
                         result.stopped_reason = "max_turns"
                         result.answer = self.config.max_turns_reply
                         session.add_assistant(result.answer, turn=tool_turns)
-                        return self._finish(result, started, session, run_id)
+                        return self._finish(result, started, session, run_id, tool_turns)
                     continue
+
+                # 真正要执行了，才把这次调用写进上下文
+                session.add_tool_call(parsed.tool_name, parsed.arguments, turn=tool_turns)
 
                 # ---------------- Step4: 执行工具（捕获异常 + trace）----------------
                 invocation = await self._execute_tool(parsed, session=session, run_id=run_id, turn=tool_turns)
@@ -341,7 +357,7 @@ class MinimalAgent:
             result.answer = self.config.internal_error_reply
             session.add_error(f"内部异常: {type(exc).__name__}: {exc}")
             session.add_assistant(result.answer)
-            return self._finish(result, started, session, run_id)
+            return self._finish(result, started, session, run_id, tool_turns)
 
     # ================================================================== 内部
     def _system_prompt(self, session: Session, max_turns: int) -> str:
@@ -453,7 +469,16 @@ class MinimalAgent:
         """连续两次完全相同的调用 → 触发提示（防止模型原地打转）。"""
         return len(call_history) >= 2 and call_history[-1] == call_history[-2]
 
-    def _finish(self, result: AgentResult, started: float, session: Session, run_id: str) -> AgentResult:
+    def _finish(
+        self,
+        result: AgentResult,
+        started: float,
+        session: Session,
+        run_id: str,
+        turns_used: Optional[int] = None,
+    ) -> AgentResult:
+        if turns_used is not None:
+            result.turns_used = turns_used
         result.latency_ms = int((time.perf_counter() - started) * 1000)
         self.session_mgr.save(session)
         self.tracer.log(

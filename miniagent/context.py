@@ -171,6 +171,7 @@ class ContextManager:
             if len(body) > self.tool_result_limit:
                 body = body[: self.tool_result_limit] + f"\n…（工具结果过长已截断，原始 {len(body)} 字符）"
                 result.trimmed_tool_results += 1
+                return {"role": "user", "content": f"【工具结果 {msg.name}】\n{body}"}
             return {"role": "user", "content": render_tool_result(msg.name, body, limit=self.tool_result_limit + 1)}
         if msg.role == "error":
             return {"role": "user", "content": render_error(msg.content, name=msg.name)}

@@ -55,17 +55,6 @@ _CMP_OPS = {
     ast.GtE: operator.ge,
 }
 
-_FUNCS: dict[str, Any] = {
-    "abs": abs, "round": round, "min": min, "max": max, "sum": sum, "pow": pow,
-    "sqrt": math.sqrt, "cbrt": lambda x: math.copysign(abs(x) ** (1 / 3), x),
-    "log": math.log, "log2": math.log2, "log10": math.log10, "exp": math.exp,
-    "sin": math.sin, "cos": math.cos, "tan": math.tan, "asin": math.asin, "acos": math.acos,
-    "floor": math.floor, "ceil": math.ceil, "trunc": math.trunc,
-    "factorial": math.factorial, "gcd": math.gcd, "hypot": math.hypot,
-    "degrees": math.degrees, "radians": math.radians, "fabs": math.fabs, "fmod": math.fmod,
-}
-_CONSTS: dict[str, float] = {"pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf}
-
 #: 严禁出现在表达式里的名字/模式（即使 AST 白名单已挡住，这里做双保险）
 FORBIDDEN_NAMES = {
     "__import__", "eval", "exec", "compile", "open", "input", "globals", "locals",
@@ -76,10 +65,73 @@ FORBIDDEN_SUBSTRINGS = ("__", "import", "lambda", "os.", "sys.", "subprocess", "
 
 MAX_EXPRESSION_LEN = 500
 MAX_POW_EXPONENT = 4096
+MAX_FACTORIAL_ARG = 1000
+#: 结果规模上限：防止 `[0]*10**9` 这类「一行表达式吃光内存」的拒绝服务
+MAX_RESULT_ITEMS = 100_000
+MAX_INT_DIGITS = 100_000
 
 
 class UnsafeExpression(ValueError):
-    """表达式包含不被允许的语法/名字。"""
+    """表达式包含不被允许的语法/名字，或规模超出安全上限。"""
+
+
+def _bounded_factorial(n: Any) -> int:
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        raise UnsafeExpression("factorial 只接受非负整数")
+    if n > MAX_FACTORIAL_ARG:
+        raise UnsafeExpression(f"factorial 参数过大（{n} > {MAX_FACTORIAL_ARG}），拒绝计算以防资源耗尽")
+    return math.factorial(n)
+
+
+def _check_function_args(node: ast.Call, args: list[Any]) -> None:
+    """对 pow / factorial 这类「参数越大、开销爆炸」的函数做上限检查。
+
+    关键点：`pow` 与 `**` 是**两条不同的路径** ——
+    `2**5000` 被 ast.BinOp 的守卫挡住，并不代表 `pow(2,5000)` 也安全，必须单独设防。
+    """
+    name = node.func.id if isinstance(node.func, ast.Name) else ""
+    if name == "pow":
+        if len(args) >= 2 and _is_number(args[1]) and abs(args[1]) > MAX_POW_EXPONENT:
+            raise UnsafeExpression(f"pow 指数过大（|{args[1]}| > {MAX_POW_EXPONENT}），拒绝计算以防资源耗尽")
+        if len(args) >= 3 and args[2] not in (0, None):
+            raise UnsafeExpression("pow 不支持取模参数（第三个参数）")
+    elif name == "factorial" and args:
+        _bounded_factorial(args[0])
+    elif name == "sum" and args and isinstance(args[0], list) and len(args[0]) > MAX_RESULT_ITEMS:
+        raise UnsafeExpression(f"sum 的元素过多（{len(args[0])} > {MAX_RESULT_ITEMS}）")
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _check_repeat_size(length: int, times: int) -> None:
+    """`[0] * n` 在真正构造之前先算规模，避免为了"算一下"就吃掉几个 GB。"""
+    if times < 0:
+        raise UnsafeExpression("不支持用负数重复序列")
+    if length * times > MAX_RESULT_ITEMS:
+        raise UnsafeExpression(
+            f"序列重复规模过大（{length} × {times} = {length * times} > {MAX_RESULT_ITEMS}），拒绝计算以防内存耗尽"
+        )
+
+
+def _check_result_size(value: Any) -> None:
+    if isinstance(value, list) and len(value) > MAX_RESULT_ITEMS:
+        raise UnsafeExpression(f"结果元素过多（{len(value)} > {MAX_RESULT_ITEMS}），拒绝返回")
+    if isinstance(value, int) and not isinstance(value, bool) and value.bit_length() > MAX_INT_DIGITS * 3.33:
+        raise UnsafeExpression(f"结果整数过大（约 {value.bit_length()} bit），拒绝返回")
+
+
+_FUNCS: dict[str, Any] = {
+    "abs": abs, "round": round, "min": min, "max": max, "sum": sum, "pow": pow,
+    "sqrt": math.sqrt, "cbrt": lambda x: math.copysign(abs(x) ** (1 / 3), x),
+    "log": math.log, "log2": math.log2, "log10": math.log10, "exp": math.exp,
+    "sin": math.sin, "cos": math.cos, "tan": math.tan, "asin": math.asin, "acos": math.acos,
+    "floor": math.floor, "ceil": math.ceil, "trunc": math.trunc,
+    "factorial": _bounded_factorial, "gcd": math.gcd, "hypot": math.hypot,
+    "degrees": math.degrees, "radians": math.radians, "fabs": math.fabs, "fmod": math.fmod,
+}
+_CONSTS: dict[str, float] = {"pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf}
 
 
 def _check_safety(expr: str) -> None:
@@ -107,7 +159,15 @@ def _eval_node(node: ast.AST, depth: int = 0) -> Any:
         left, right = _eval_node(node.left, depth + 1), _eval_node(node.right, depth + 1)
         if op is operator.pow and isinstance(right, (int, float)) and abs(right) > MAX_POW_EXPONENT:
             raise UnsafeExpression(f"指数过大（|{right}| > {MAX_POW_EXPONENT}），拒绝计算以防资源耗尽")
-        return op(left, right)
+        # 序列重复（[0]*10**9 这类"一行吃光内存"）：先看规模再决定要不要真的构造
+        if op is operator.mul:
+            if isinstance(left, int) and isinstance(right, list):
+                left, right = right, left
+            if isinstance(left, list) and isinstance(right, int):
+                _check_repeat_size(len(left), right)
+        result = op(left, right)
+        _check_result_size(result)
+        return result
     if isinstance(node, ast.UnaryOp):
         op = _UNARY_OPS.get(type(node.op))
         if op is None:
@@ -140,7 +200,10 @@ def _eval_node(node: ast.AST, depth: int = 0) -> Any:
         if node.keywords:
             raise UnsafeExpression("函数调用不支持关键字参数")
         args = [_eval_node(arg, depth + 1) for arg in node.args]
-        return func(*args)
+        _check_function_args(node, args)
+        result = func(*args)
+        _check_result_size(result)
+        return result
     if isinstance(node, (ast.List, ast.Tuple)):
         return [_eval_node(elt, depth + 1) for elt in node.elts]
     raise UnsafeExpression(f"不支持的语法节点: {type(node).__name__}（本项目只做数学表达式计算）")

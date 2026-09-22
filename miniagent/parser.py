@@ -117,7 +117,7 @@ def _normalize(text: str) -> str:
 
 
 def extract_json_blocks(text: str, *, max_candidates: int = 8) -> list[str]:
-    """按「markdown 代码块 → 花括号配对 → 整段文本」的顺序收集 JSON 候选串。"""
+    """按「markdown 代码块 → 花括号/方括号配对 → 整段文本」的顺序收集 JSON 候选串。"""
     if not text:
         return []
     candidates: list[str] = []
@@ -126,6 +126,9 @@ def extract_json_blocks(text: str, *, max_candidates: int = 8) -> list[str]:
         inner = match.group(1).strip()
         if inner:
             candidates.append(inner)
+    # 方括号优先：`[{...},{...}]` 这种「多个工具调用」必须先被整体看到，
+    # 否则会被花括号扫描先切出第一个对象，从而**静默丢掉**后面的调用。
+    candidates.extend(_bracket_candidates(normalized, max_candidates=max_candidates))
     candidates.extend(_brace_candidates(normalized, max_candidates=max_candidates))
     stripped = normalized.strip()
     if stripped and stripped not in candidates:
@@ -141,14 +144,15 @@ def extract_json_blocks(text: str, *, max_candidates: int = 8) -> list[str]:
     return unique[:max_candidates]
 
 
-def _brace_candidates(text: str, *, max_candidates: int = 8) -> list[str]:
-    """扫描出所有「花括号配对」的片段（正确跳过字符串内的括号与转义）。
+def _scan_candidates(text: str, open_ch: str, close_ch: str, *, skip_nested_in: str = "", max_candidates: int = 8) -> list[str]:
+    """通用的「配对扫描」：正确跳过字符串内部与转义字符。
 
-    只在**字符串外**统计深度：`{"content":"a{b}c"}` 里的 `{` `}` 不能被算进深度，
-    否则会把一个合法 JSON 切碎。
+    `skip_nested_in` 用于避免重复：扫描方括号时忽略花括号内部的 `[`（那些属于某个对象的
+    arguments 字段，已经被 `_brace_candidates` 覆盖）。
     """
     results: list[str] = []
     depth = 0
+    outer = 0
     start = -1
     in_string = False
     escaped = False
@@ -163,18 +167,37 @@ def _brace_candidates(text: str, *, max_candidates: int = 8) -> list[str]:
             continue
         if ch == '"':
             in_string = True
-        elif ch == "{":
+            continue
+        if skip_nested_in:
+            if ch == skip_nested_in:
+                outer += 1
+            elif ch == {"{": "}"}.get(skip_nested_in, ""):
+                outer = max(0, outer - 1)
+        if ch == open_ch:
             if depth == 0:
                 start = idx
             depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    results.append(text[start : idx + 1])
-                    if len(results) >= max_candidates:
-                        return results
+        elif ch == close_ch and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0 and outer == 0:
+                results.append(text[start : idx + 1])
+                if len(results) >= max_candidates:
+                    return results
     return results
+
+
+def _brace_candidates(text: str, *, max_candidates: int = 8) -> list[str]:
+    """扫描出所有「花括号配对」的片段（正确跳过字符串内的括号与转义）。
+
+    只在**字符串外**统计深度：`{"content":"a{b}c"}` 里的 `{` `}` 不能被算进深度，
+    否则会把一个合法 JSON 切碎。
+    """
+    return _scan_candidates(text, "{", "}", max_candidates=max_candidates)
+
+
+def _bracket_candidates(text: str, *, max_candidates: int = 4) -> list[str]:
+    """扫描出所有「方括号配对」的片段（处理 `[{...},{...}]` 这类数组输出）。"""
+    return _scan_candidates(text, "[", "]", skip_nested_in="{", max_candidates=max_candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +207,10 @@ def _brace_candidates(text: str, *, max_candidates: int = 8) -> list[str]:
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 _UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)(\s*:)")
 _PY_LITERAL_RE = re.compile(r"\b(None|True|False)\b")
+
+
+#: `try_json` 在「结构被截断、靠补全括号才解析成功」时打的标记
+TRUNCATION_REPAIR = "补齐被截断的结构"
 
 
 def try_json(text: str) -> tuple[Optional[Any], list[str]]:
@@ -220,10 +247,12 @@ def try_json(text: str) -> tuple[Optional[Any], list[str]]:
         pass
 
     # 修复 2：截断的 JSON（max_tokens 用完）→ 补齐引号/括号
+    # 注意：这条修复会「凭空补出结构」，因此必须打标记，让调用方知道
+    # **这份 JSON 并不是模型完整输出的**（不能当成功的工具调用来执行）。
     closed = _close_truncated(fixed)
     if closed and closed != fixed:
         try:
-            return json.loads(closed), repairs + ["补齐被截断的括号/引号"]
+            return json.loads(closed), repairs + [TRUNCATION_REPAIR]
         except json.JSONDecodeError:
             pass
 
@@ -322,29 +351,89 @@ class Parser:
         if not text:
             raise ParseError("LLM 输出为空，无法解析", raw=raw)
 
-        candidates = extract_json_blocks(text)
+        # 候选分两档，这个区分非常重要：
+        #   ① 权威候选：整段文本 / 代码块内容 —— 它们代表模型的**完整意图**；
+        #   ② 兜底候选：花括号/方括号切片 —— 只在①连 JSON 都解析不出来时才用（提取"脏文本里的 JSON"）。
+        #
+        # 绝不能把②和①混在一个循环里"谁先成功用谁"：那会让语义校验形同虚设 ——
+        # 例如 `[{call1},{call2}]` 明明触发了「一次只能一个工具调用」的校验错误，
+        # 却因为切片 `{call1}` 能解析成功而被静默放行。
+        primary: list[str] = []
+        fence_stripped = strip_code_fence(text).strip()
+        if fence_stripped:
+            primary.append(fence_stripped)
+        fallback: list[str] = []
+        for candidate in extract_json_blocks(text):
+            if candidate not in primary and candidate not in fallback:
+                fallback.append(candidate)
+
         errors: list[str] = []
-        validation_errors: list[ParseError] = []
-        for candidate in candidates:
+        #: 解析成功但违反协议/schema 的错误 —— 这类信息对模型最有用，优先级最高
+        validation_errors: list[tuple[ParseError, list[str]]] = []
+
+        def attempt(candidate: str) -> Optional[ParsedOutput]:
+            """尝试一个候选：成功返回结果；语义错误记录后返回 None（不抛）。"""
             data, repairs = try_json(candidate)
             if data is None:
                 errors.append(f"候选片段不是合法 JSON: {truncate(candidate, 120)}")
-                continue
+                return None
+            truncated = TRUNCATION_REPAIR in repairs
             try:
-                return self._from_object(data, raw=raw, repairs=repairs)
+                parsed = self._from_object(data, raw=raw, repairs=repairs)
             except ParseError as exc:
-                # JSON 本身合法，但违反协议/schema —— 这类错误信息对 LLM 最有用，优先保留
-                validation_errors.append(exc)
+                if truncated:
+                    # 是「没输出完」而不是「参数写错」，提示要说清楚，否则模型会以为只是漏填字段
+                    exc = ParseError(
+                        f"你的输出看起来**没有输出完整**（{exc.message}）",
+                        raw=raw,
+                        hint="请重新输出完整的一个 JSON 对象，不要中途截断。",
+                        detail=exc.detail or {"raw_output": truncate(raw, 400)},
+                    )
+                validation_errors.append((exc, repairs))
                 errors.append(exc.message)
+                return None
+            # 关键安全阀：靠「补全结构」才解析成功的 **工具调用** 不能执行。
+            # 否则截断会把 `{"tool_name":"calculator","arguments":{"expression":` 这种残片
+            # 补成 `{"expression": null}` 甚至 `{}`，然后带着默认值真的去执行一次工具。
+            if truncated and isinstance(parsed, ToolCall):
+                exc = ParseError(
+                    "你的输出**没有输出完整**（工具调用被截断），因此这次调用没有执行。",
+                    raw=raw,
+                    hint="请重新输出完整的一个 JSON 对象，不要中途截断。",
+                    detail={"raw_output": truncate(raw, 400)},
+                )
+                validation_errors.append((exc, repairs))
+                errors.append(exc.message)
+                return None
+            return parsed
+
+        # 阶段一：权威候选 —— 只要 JSON 合法，它的校验结论就是最终结论，不再降级尝试切片
+        for candidate in primary:
+            parsed = attempt(candidate)
+            if parsed is not None:
+                return parsed
+            if validation_errors:
+                break
+
+        # 阶段二：兜底候选（仅在权威候选连 JSON 都不合法时才走到这里）
+        if not validation_errors:
+            for candidate in fallback:
+                parsed = attempt(candidate)
+                if parsed is not None:
+                    return parsed
 
         # 1) schema / 协议错误优先：它告诉模型「哪里填错了」，比「格式不合法」有用得多
+        #    但「输出不完整」的提示比「缺字段」更准确，所以先挑带截断修复的那条。
         if validation_errors:
-            first = validation_errors[0]
+            chosen = next(
+                (item for item in validation_errors if TRUNCATION_REPAIR in item[1]),
+                validation_errors[0],
+            )[0]
             raise ParseError(
-                first.message,
+                chosen.message,
                 raw=raw,
-                hint=first.hint,
-                detail=first.detail or {"raw_output": truncate(raw, 400)},
+                hint=chosen.hint,
+                detail=chosen.detail or {"raw_output": truncate(raw, 400)},
             )
 
         # 2) 完全没解析出 JSON：区分两种情况
@@ -377,12 +466,51 @@ class Parser:
     # ------------------------------------------------------------------ 校验
     def _from_object(self, data: Any, *, raw: str, repairs: list[str]) -> ParsedOutput:
         if isinstance(data, list):
-            if len(data) == 1:
-                return self._from_object(data[0], raw=raw, repairs=repairs + ["数组解包"])
+            if not data:
+                raise ParseError("LLM 输出了空数组", raw=raw)
+            # 注意：不能对元素递归调用 _from_object 并让异常直接冒泡 ——
+            # 数组里混着一个写坏的片段时，应该报「数组里有非法元素」，而不是半路中断。
+            items: list[ParsedOutput] = []
+            element_errors: list[str] = []
             for item in data:
-                if isinstance(item, dict) and self._looks_like_tool_call(item):
-                    return self._from_object(item, raw=raw, repairs=repairs + ["从数组中选择工具调用"])
-            raise ParseError(f"LLM 输出了数组但不是单个调用对象: {truncate(safe_json(data), 160)}", raw=raw)
+                if not isinstance(item, (dict, list)):
+                    continue
+                try:
+                    items.append(self._from_object(item, raw=raw, repairs=repairs))
+                except ParseError as exc:
+                    element_errors.append(exc.message)
+            calls = [item for item in items if isinstance(item, ToolCall)]
+            if not calls:
+                answers = [item for item in items if isinstance(item, Answer)]
+                if answers:
+                    return Answer(
+                        content="\n".join(a.content for a in answers),
+                        raw=raw,
+                        repairs=repairs + ["数组合并为回答"],
+                    )
+                raise ParseError(
+                    f"数组里没有可用的 answer/tool_call: {truncate(safe_json(data), 160)}"
+                    + (f"；元素错误: {'; '.join(element_errors[:2])}" if element_errors else ""),
+                    raw=raw,
+                )
+            if len(calls) > 1:
+                # 本项目一次只执行一个工具调用。**不能静默丢掉后面的** ——
+                # 明确告诉模型「只执行了第一个」，它下次就会只发一个。
+                names = ", ".join(f"`{c.tool_name}`" for c in calls)
+                raise ParseError(
+                    f"你一次输出了多个工具调用（{names}）。本项目一次只执行**一个**工具调用，"
+                    "请只输出第一个（或最必要的那个）。",
+                    raw=raw,
+                    detail={"tool_calls": [c.tool_name for c in calls]},
+                )
+            first = calls[0]
+            return ToolCall(
+                tool_name=first.tool_name,
+                arguments=first.arguments,
+                raw=raw,
+                reason=first.reason,
+                repaired=first.repaired + ["数组解包"],
+            )
         if isinstance(data, str):
             # 形如 {"answer": "..."} 里再套一层 JSON 字符串
             nested, nested_repairs = try_json(data)
@@ -483,37 +611,47 @@ class Parser:
 
     @staticmethod
     def _looks_like_plain_answer(text: str) -> bool:
-        """判断一段没有 JSON 的文本是不是「模型直接说的话」。"""
+        """判断一段没有 JSON 的文本是不是「模型直接说的话」。
+
+        失败模式很关键：**不能因为文本里出现了引号或花括号就当它是坏 JSON** ——
+        真实模型经常输出「他说 "hello" 然后走了。」「函数签名是 f(x) { return 1 }」这类
+        含标点的正常回答，误判会让用户拿到「解析失败」而不是答案。
+
+        判据只看两件事：
+        1. 是不是以结构字符开头（`{` / `[`）→ 明显在写 JSON；
+        2. 有没有「JSON 结构 + 协议词汇」的组合 → 明显在写协议 JSON。
+        其余一律当自然语言。
+        """
         stripped = strip_code_fence(text).strip()
         if not stripped:
             return False
-        # 明显的半截 JSON / 工具调用残留 → 不当成答案
-        if stripped.startswith(("{", "[")) and stripped.endswith(("}", "]")):
+        if stripped[0] in "{[":
             return False
-        # 出现 JSON 结构字符（花括号/方括号/双引号）→ 更像是在尝试输出 JSON，交给 broken_json 分支
-        if any(ch in stripped for ch in ('"', "{", "}")):
+        if re.search(r'["\'](type|tool_name|arguments|content|answer|tool_call)["\']\s*:', stripped):
             return False
         if re.search(r'"(tool_name|arguments|tool_call)"', stripped):
             return False
-        # 提到协议关键字（说明模型在尝试输出 JSON 而不是在回答）
-        for marker in ('"type"', "'type'", '"content"', "tool_name", "arguments", "tool_call"):
-            if marker in stripped:
-                return False
+        has_structure = any(ch in stripped for ch in "{}")
+        mentions_protocol = re.search(r"\b(tool_name|tool_call)\b", stripped) or "arguments" in stripped or '"type"' in stripped
+        has_json_key_shape = re.search(r'"\s*[\w\-]+\s*"\s*:', stripped) is not None
+        if has_structure and (mentions_protocol or has_json_key_shape):
+            return False
+        if not has_structure and has_json_key_shape:
+            return False
         return True
 
     @staticmethod
     def _looks_like_broken_json(text: str) -> bool:
-        """判断文本是不是「意图输出 JSON 但写坏了」。"""
+        """判断文本是不是「意图输出 JSON 但写坏了」。
+
+        与 `_looks_like_plain_answer` 互补：只要不是自然语言，就是在写 JSON（只是写坏了）。
+        """
         stripped = strip_code_fence(text).strip()
-        has_protocol_marker = any(
-            marker in stripped
-            for marker in ('"type"', "'type'", '"content"', '"tool_name"', "tool_name", "arguments", "tool_call")
-        )
-        has_json_punctuation = any(ch in stripped for ch in ('"', "{", "}"))
-        balanced = stripped.count("{") == stripped.count("}") and stripped.count("[") == stripped.count("]")
-        if has_protocol_marker:
+        if not stripped:
+            return False
+        if stripped[0] in "{[":
             return True
-        return has_json_punctuation and not balanced
+        return not Parser._looks_like_plain_answer(text)
 
 
 def parse_llm_output(raw: str, registry: Any = None) -> ParsedOutput:

@@ -12,6 +12,21 @@ from typing import Any, Optional
 
 from .utils import load_dotenv
 
+#: System Prompt 默认路径（与 prompts.py 共用同一个常量，避免两处不一致）
+from .prompts import DEFAULT_PROMPT_PATH  # noqa: E402  (放在 utils 之后仅为可读性)
+
+#: 各 provider 的默认 OpenAI 兼容端点（与 llm/openai_compatible.py 保持一致）
+DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "siliconflow": "https://api.siliconflow.cn/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "ollama": "http://localhost:11434/v1",
+    "vllm": "http://localhost:8000/v1",
+}
+
 PROVIDER_DEFAULT_MODEL = {
     "openai": "gpt-4o-mini",
     "deepseek": "deepseek-chat",
@@ -68,6 +83,7 @@ class AgentConfig:
     # ---------------- 循环与轮次 ----------------
     max_tool_turns: int = 10            # 单次提问最多允许的工具调用轮次
     max_parse_retries: int = 3          # 连续解析失败上限（超过则降级返回）
+    max_limit_rejections: int = 3       # 达到轮次上限后模型仍坚持调工具的次数上限
     tool_timeout: float = 10.0          # 单个工具执行超时（秒）
 
     # ---------------- 上下文 ----------------
@@ -83,7 +99,7 @@ class AgentConfig:
     session_path: str = "logs/sessions.json"
 
     # ---------------- Prompt / 日志 ----------------
-    prompt_path: str = ""               # 留空用 prompts/system_prompt.md
+    prompt_path: str = DEFAULT_PROMPT_PATH     # 默认走 prompts/system_prompt.md
     tool_prompt_mode: str = "json"      # json / text
     log_dir: str = "logs"
     console_trace: bool = True
@@ -117,6 +133,9 @@ class AgentConfig:
             timeout=_env_float("MINIAGENT_TIMEOUT", 60.0),
             max_retries=_env_int("MINIAGENT_MAX_RETRIES", 3),
             max_tool_turns=_env_int("MINIAGENT_MAX_TOOL_TURNS", 10),
+            max_parse_retries=_env_int("MINIAGENT_MAX_PARSE_RETRIES", 3),
+            max_limit_rejections=_env_int("MINIAGENT_MAX_LIMIT_REJECTIONS", 3),
+            tool_timeout=_env_float("MINIAGENT_TOOL_TIMEOUT", 10.0),
             max_context_tokens=_env_int("MINIAGENT_MAX_CONTEXT_TOKENS", 3000),
             max_context_messages=_env_int("MINIAGENT_MAX_CONTEXT_MESSAGES", 40),
             keep_recent_messages=_env_int("MINIAGENT_KEEP_RECENT_MESSAGES", 12),
@@ -148,11 +167,14 @@ class AgentConfig:
         problems: list[str] = []
         if self.provider.lower() in ("mock", "offline", "fake", "scripted"):
             return problems
-        if not self.base_url:
+        resolved_base = self.base_url or DEFAULT_BASE_URLS.get(self.provider.lower(), "")
+        if not resolved_base:
             problems.append(
-                f"provider={self.provider} 但没有 base_url：请设置 MINIAGENT_BASE_URL（如 https://api.deepseek.com/v1）"
+                f"provider={self.provider} 没有可用的 base_url：请设置 MINIAGENT_BASE_URL"
+                "（如 https://api.deepseek.com/v1），或改用内置 provider："
+                + "/".join(sorted(DEFAULT_BASE_URLS))
             )
-        if not self.api_key and "localhost" not in self.base_url and "127.0.0.1" not in self.base_url:
+        if not self.api_key and not any(host in resolved_base for host in ("localhost", "127.0.0.1")):
             problems.append("缺少 API Key：请设置 MINIAGENT_API_KEY（或 OPENAI_API_KEY / DEEPSEEK_API_KEY）")
         return problems
 

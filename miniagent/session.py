@@ -73,11 +73,15 @@ class Session:
         max_context_tokens: int = 3000,
         keep_recent_messages: int = 12,
         created_at: Optional[int] = None,
+        max_turn_override: Optional[int] = None,
     ) -> None:
         self.session_id = session_id
         self.user_id, self.window_id = split_session_id(session_id)
         self.messages: list[Message] = []
         self.max_turn = max_turn
+        #: 会话级「显式覆盖」的轮次上限（用户主动设过才非空）；
+        #: Agent 用它区分「配置里的默认值」与「针对这个会话的定制值」。
+        self.max_turn_override = max_turn_override
         self.max_context_tokens = max_context_tokens
         self.keep_recent_messages = keep_recent_messages
         self.created_at = created_at or now_ms()
@@ -175,6 +179,7 @@ class Session:
             "keep_recent_messages": self.keep_recent_messages,
             "compress_count": self.compress_count,
             "dropped_messages": self.dropped_messages,
+            "max_turn_override": self.max_turn_override,
             "meta": self.meta,
             "messages": [m.to_dict() for m in self.messages],
         }
@@ -187,6 +192,7 @@ class Session:
             max_context_tokens=int(data.get("max_context_tokens", 3000)),
             keep_recent_messages=int(data.get("keep_recent_messages", 12)),
             created_at=int(data.get("created_at") or now_ms()),
+            max_turn_override=data.get("max_turn_override"),
         )
         session.messages = [Message.from_dict(m) for m in data.get("messages", [])]
         session.turn_count = int(data.get("turn_count", 0))
@@ -314,7 +320,7 @@ class SessionManager:
             raw = self.store.load(session_id)
             if raw and session_id not in self._loaded:
                 session = Session.from_dict(raw)
-                session.max_turn = session.max_turn or self.max_turn
+                session.max_turn = session.max_turn_override or self.max_turn
                 self.sessions[session_id] = session
                 self._loaded.add(session_id)
                 return session

@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
@@ -54,6 +55,7 @@ class Tracer:
         console: bool = True,
         raw_llm_dir: Optional[str] = None,
         max_field_chars: int = 1200,
+        max_events: int = 20000,
     ) -> None:
         self.log_dir = log_dir
         self.trace_dir = os.path.join(log_dir, "traces")
@@ -62,7 +64,8 @@ class Tracer:
         self.console = console
         self.max_field_chars = max_field_chars
         self._lock = threading.Lock()
-        self._events: list[TraceEvent] = []
+        #: 只保留最近 N 条事件，避免长驻进程（服务端）内存无上限增长
+        self._events: deque[TraceEvent] = deque(maxlen=max(1, max_events))
         self._run_files: dict[str, Any] = {}
         for path in (self.log_dir, self.trace_dir, self.raw_dir):
             os.makedirs(path, exist_ok=True)
@@ -127,12 +130,16 @@ class Tracer:
         )
 
     def log_exception(self, exc: BaseException, *, where: str, **meta: Any) -> TraceEvent:
+        """记录异常。**一定要带 traceback** —— 只有类型和 message 是没法排查的。"""
+        import traceback as _traceback
+
         return self.log(
             "exception",
             level="ERROR",
             where=where,
             error_type=type(exc).__name__,
             error=str(exc),
+            traceback="".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))[-4000:],
             **meta,
         )
 
@@ -199,6 +206,8 @@ class Tracer:
         return preview
 
     def _append_jsonl(self, ev: TraceEvent) -> None:
+        if not self.jsonl_path:
+            return
         try:
             with open(self.jsonl_path, "a", encoding="utf-8") as fh:
                 fh.write(ev.line() + "\n")
@@ -206,7 +215,9 @@ class Tracer:
             pass
 
     def _append_run_file(self, ev: TraceEvent) -> None:
-        if not ev.run_id:
+        # 内存模式（Tracer.in_memory）没有 trace_dir：必须直接返回，
+        # 否则 os.path.join("", "run_x.log") 会把日志写到进程 CWD。
+        if not ev.run_id or not self.trace_dir:
             return
         try:
             fh = self._run_files.get(ev.run_id)
@@ -217,6 +228,10 @@ class Tracer:
                 fh.write(f"# run {ev.run_id}  session={ev.session_id}  started={ev.ts}\n")
             fh.write(self._format(ev) + "\n")
             fh.flush()
+            # 一次 run 结束就关掉文件句柄：长驻服务里不能每次提问都泄漏一个 fd
+            if ev.event == "run_end":
+                fh.close()
+                self._run_files.pop(ev.run_id, None)
         except OSError:
             pass
 
@@ -261,16 +276,18 @@ class Tracer:
             detail = truncate(data.get("error"), 160)
         print(f"  {icon} [{ev.event}]{dur} {detail}", flush=True)
 
-    # 供测试使用：静默收集，不落盘
     @classmethod
     def in_memory(cls) -> "Tracer":
+        """纯内存 Tracer：**不落任何盘**（测试与单次调试用）。"""
         tracer = cls.__new__(cls)
-        tracer.log_dir = tracer.trace_dir = tracer.raw_dir = ""
-        tracer.jsonl_path = os.devnull
+        tracer.log_dir = ""
+        tracer.trace_dir = ""
+        tracer.raw_dir = ""
+        tracer.jsonl_path = ""
         tracer.console = False
         tracer.max_field_chars = 10**9
         tracer._lock = threading.Lock()
-        tracer._events = []
+        tracer._events = deque(maxlen=20000)
         tracer._run_files = {}
         return tracer
 

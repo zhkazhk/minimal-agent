@@ -169,11 +169,37 @@ def test_half_json_is_not_treated_as_answer(parser: Parser) -> None:
         parser.parse('{"type": "tool_call", "tool_name": "calc')
 
 
+def test_prose_with_quotes_and_braces_is_still_an_answer(parser: Parser) -> None:
+    """真实模型经常输出含引号/花括号的自然语言 —— 不能误判成坏 JSON。"""
+    for text in ['他说 "hello" 然后走了。', "函数签名是 f(x) { return 1 }", "集合 {1,2,3} 是有限的。"]:
+        parsed = parser.parse(text)
+        assert isinstance(parsed, Answer), text
+        assert parsed.content.strip() == text
+
+
 def test_error_message_contains_hint(parser: Parser) -> None:
+    # 明确的 JSON 意图 + 结构损坏（缺右括号 → arguments 也缺失）→ 必须报错而不是降级成回答
     with pytest.raises(ParseError) as excinfo:
-        parser.parse("完全不是 JSON 的一段话 {{{ }}}")
-    assert "JSON" in str(excinfo.value)
+        parser.parse('{"type": "tool_call", "tool_name": "calculator", "arguments": {"expression": "1+1"')
+    assert isinstance(excinfo.value, ParseError)
     assert "修复建议" in excinfo.value.to_observation()
+
+
+def test_broken_protocol_json_is_not_downgraded_to_answer(parser: Parser) -> None:
+    """结构损坏的协议 JSON 绝不能被当成"回答"返回给用户。"""
+    for raw in ('{"type": "tool_call", "tool_name": "calculator"', '{"type":"answer","content"'):
+        with pytest.raises(ParseError):
+            parser.parse(raw)
+
+
+def test_unknown_tool_error_is_specific(parser: Parser) -> None:
+    """工具名不存在时，应给「工具不存在 + 可用列表」而不是笼统的格式错误。"""
+    with pytest.raises(ParseError) as excinfo:
+        parser.parse('{"type": "tool_call", "tool_name": "calc", "arguments": {}}')
+    message = str(excinfo.value)
+    assert "不存在" in message
+    assert "calculator" in message
+    assert "格式不合法" not in message
 
 
 def test_try_parse_never_raises(parser: Parser) -> None:

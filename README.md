@@ -19,8 +19,8 @@
 | --- | --- |
 | 语言 / 版本 | Python 3.9+（开发验证于 3.13.14 / Windows） |
 | 运行期依赖 | **无**（`urllib` + `asyncio`；可选 `httpx` / `aiohttp` / `jsonschema`） |
-| 代码规模 | 约 9300 行（含注释/文档串）；其中**有效代码约 6000 行**：核心运行时 ≈3550 行，测试 ≈1900 行，示例/Demo ≈600 行 |
-| 自动化测试 | **208 passed / 0 failed**（9 个测试模块，含 11 个端到端验收用例） |
+| 代码规模 | 约 10300 行（含注释/文档串）；其中**有效代码约 6600 行**：核心运行时 ≈3750 行，测试 ≈2250 行，示例/Demo ≈600 行 |
+| 自动化测试 | **252 passed / 0 failed**（10 个测试模块，含 11 个端到端验收用例） |
 | 验收用例 | **11 / 11 通过**（交付要求 7 个必测 + 4 个补充护栏用例） |
 | LLM 接口 | 任意 OpenAI 兼容端点（DeepSeek / OpenAI / 通义 / Moonshot / vLLM / Ollama…） |
 
@@ -634,20 +634,21 @@ python tests/run_all.py test_parser     # 只跑解析器测试
 pytest -q
 ```
 
-实测结果：**208 passed / 0 failed**。
+实测结果：**252 passed / 0 failed**。
 
 | 测试模块 | 用例数 | 覆盖内容 |
 | --- | --- | --- |
-| `test_agent_cases.py` | 32 | 7 个验收用例 + 护栏（轮次上限 / 重复调用 / 解析失败 / LLM 异常 / 工具超时 / 并发多窗口）+ 自定义工具端到端 |
-| `test_tools.py` | 42 | 注册/注销、参数校验、calculator 安全边界（11 条注入用例）、search/weather 确定性 |
-| `test_parser.py` | 29 | JSON 提取、脏数据修复（全角/单引号/尾随逗号/截断/无引号 key）、协议与 schema 校验、错误信息质量 |
+| `test_review_regressions.py` | 41 | **代码评审发现问题的回归测试**（每条对应一个真实缺陷，见 [§14.6](#146-代码评审发现的缺陷与修复)） |
+| `test_tools.py` | 42 | 注册/注销、参数校验、calculator 安全边界（含 `pow`/`factorial`/序列重复的资源耗尽防护）、search/weather 确定性 |
 | `test_llm_client.py` | 34 | 多厂商响应解析、重试与快速失败、**注入假传输层**测试 HTTP 行为、采样参数回退、剧本/离线客户端 |
+| `test_agent_cases.py` | 32 | 7 个验收用例 + 护栏（轮次上限 / 重复调用 / 解析失败 / LLM 异常 / 工具超时 / 并发多窗口）+ 自定义工具端到端 |
+| `test_parser.py` | 32 | JSON 提取、脏数据修复（全角/单引号/尾随逗号/截断/无引号 key）、协议与 schema 校验、错误信息质量 |
 | `test_session_context.py` | 23 | 窗口隔离、存储落盘、双阈值裁剪、边界清理、渲染协议、轮次规则 |
-| `test_edge_cases.py` | 19 | 并发同 session、8 窗口并行隔离、特殊字符往返、超大工具结果、多轮混合追问、多 JSON 对象、多实例共享 Session、极小上下文预算 |
-| `test_observability.py` | 17 | trace 落盘、事件过滤、统计、字段截断、Prompt 渲染、Config 校验 |
+| `test_observability.py` | 17 | trace 落盘、事件过滤、统计、字段截断、异常 traceback、Prompt 渲染、Config 校验 |
+| `test_edge_cases.py` | 16 | 并发同 session、8 窗口并行隔离、特殊字符往返、超大工具结果、多轮混合追问、多 JSON 对象、多实例共享 Session、极小上下文预算 |
 | `test_examples.py` | 8 | 示例脚本不腐烂 |
 | `test_cli_and_demo.py` | 7 | CLI 各子命令、`python -m miniagent demo` 子进程端到端 |
-| **合计** | **208** | |
+| **合计** | **252** | |
 
 测试设计上值得一提的两点：
 
@@ -747,6 +748,9 @@ config = AgentConfig.from_env(tool_deps={"search_api": RealSearchAPI()})
 | `MINIAGENT_TIMEOUT` / `MINIAGENT_MAX_RETRIES` | `60` / `3` | HTTP 超时与重试次数（指数退避） |
 | `MINIAGENT_HTTP_BACKEND` | `stdlib` | `stdlib` / `httpx` / `aiohttp` |
 | `MINIAGENT_MAX_TOOL_TURNS` | `10` | 单次提问的工具调用轮次上限 |
+| `MINIAGENT_MAX_PARSE_RETRIES` | `3` | 连续解析失败上限（超过则降级返回可读文案） |
+| `MINIAGENT_MAX_LIMIT_REJECTIONS` | `3` | 到达轮次上限后模型仍坚持调工具的次数上限 |
+| `MINIAGENT_TOOL_TIMEOUT` | `10` | 单个工具执行超时（秒）；同步 handler 在线程池中执行 |
 | `MINIAGENT_MAX_CONTEXT_TOKENS` | `3000` | 上下文 token 预算（启发式估算） |
 | `MINIAGENT_MAX_CONTEXT_MESSAGES` | `40` | 上下文消息条数上限 |
 | `MINIAGENT_KEEP_RECENT_MESSAGES` | `12` | 裁剪时保留最近 N 条 |
@@ -797,7 +801,7 @@ config = AgentConfig.from_env(tool_deps={"search_api": RealSearchAPI()})
 | 1 | `{"expression": 123}` 被静默接受 | 早期 coerce 会把数字转成字符串（"无损修正"做过头了） | 去掉 number→string 的宽松化，让校验失败并把「类型应为 string」回灌给模型 | `test_case6_numbers_instead_of_string_is_rejected` |
 | 2 | 模型把参数塞成 `"2"` 而 schema 要 integer | 模型习惯 | 保留 `"2"→2`、`"true"→True`、单值→数组、补 default 这类**真无损**修正 | `test_argument_type_coercion`、`test_default_value_filled` |
 | 3 | 校验错误发生在工具执行之后（白白执行一次） | 早期只在 handler 内校验 | 把校验前移到 Parser 阶段（`registry.validate_call`），执行前就拦下 | `用例6`（`tool_calls` 为 1，只有修正后那次执行） |
-| 4 | 工具超时把整个循环卡死 | 没有超时控制 | `asyncio.wait_for` + `tool_timeout`（默认 10s），超时转成可回灌文本 | `test_tool_timeout_is_caught` |
+| 4 | 工具超时把整个循环卡死 | 没有超时控制；早期同步 handler 还会阻塞事件循环 | **同步 handler 放进线程池** + `asyncio.wait_for` + `tool_timeout`（默认 10s），超时转成可回灌文本（详见 [§14.6](#146-代码评审发现的缺陷与修复) 第 6 条） | `test_tool_timeout_is_caught`、`test_sync_handler_times_out` |
 | 5 | 大小写/别名不一致（`tool` vs `tool_name`） | 不同模型输出习惯不同 | Parser 兼容多组字段别名 | `test_plain_tool_call` 系列 |
 
 ### 14.4 循环护栏
@@ -809,7 +813,32 @@ config = AgentConfig.from_env(tool_deps={"search_api": RealSearchAPI()})
 | 3 | 同工具同参数反复调用 | 模型原地打转 | 检测连续重复调用，注入提示 | `test_repeated_identical_call_gets_hint` |
 | 4 | 解析一直失败，循环空转 | 没有失败计数 | `max_parse_retries` + 降级返回 | `test_parse_failure_then_give_up_gracefully` |
 
-### 14.5 工程细节
+### 14.6 代码评审发现的缺陷与修复
+
+跑通功能之后，我做了一轮**对抗式代码评审**（专门找"测试绿但线上会出事"的问题），
+发现 12 个真实缺陷 —— 全部已修复，并在 `tests/test_review_regressions.py`（41 个用例）里逐条锁死。
+挑最值得记录的几条：
+
+| # | 缺陷（严重度） | 为什么危险 | 修复 | 回归测试 |
+| --- | --- | --- | --- | --- |
+| 1 | **`prompts/system_prompt.md` 从未被加载**（HIGH） | `AgentConfig.prompt_path` 默认 `""` → `PromptLoader("")` → `open("")` 抛 `OSError` → **静默退化**成 6 行 fallback。真实 LLM 拿到的是一份残缺协议说明，工具调用正确率会明显下降 | `prompt_path` 默认指向 `DEFAULT_PROMPT_PATH`；并从 `prompts.py` 复用同一常量，避免两处不一致 | `test_agent_actually_uses_markdown_system_prompt` |
+| 2 | **`ToolContext` 依赖注入是死代码**（HIGH） | `registry.execute()` 造好了 `ctx` 却从没传给 handler；README 与示例都宣称支持 `ctx.dep(...)`，声明 `ctx` 的 handler 直接报 `TypeError` | 用 `inspect.signature` 检测 handler 声明的上下文形参名（`ctx`/`context`/`tool_ctx`）并注入 | `test_ctx_is_injected_when_handler_declares_it` 等 4 条 |
+| 3 | **截断的 JSON 被"修补"后真的执行了工具**（HIGH） | `{"tool_name":"calculator","arguments":{"expression":` 会被补全成 `{"expression": null}` 甚至 `{}`，然后带着默认值**真的执行一次工具**，用户却看到莫名其妙的结果 | `try_json` 对"补全结构"打 `TRUNCATION_REPAIR` 标记；带该标记的工具调用**一律拒绝执行**并回灌「你没有输出完整」 | `test_truncated_protocol_output_gets_actionable_hint` |
+| 4 | **解析器回退绕过语义校验**（HIGH） | 候选循环「谁先成功用谁」：`[{call1},{call2}]` 明明触发「一次只能一个工具调用」的校验，却被切片 `{call1}` 静默放行 → 校验形同虚设 | 候选分两档：**权威候选**（整段/代码块）的校验结论即最终结论；切片只在权威候选连 JSON 都不合法时才用 | `test_multiple_tool_calls_in_array_are_reported` |
+| 5 | **calculator 可被一个表达式打爆内存**（MED-HIGH） | `pow(2,5000)` 绕过 `**` 的指数守卫；`factorial(100000)`、`[0]*10**9` 无上限。因为 handler 是同步的，`tool_timeout` 拦不住 → 一次 LLM 工具调用可让进程 OOM | 补 `pow`/`factorial`/`sum` 的参数上限、序列重复规模预检、结果规模与整数字节数上限 | `test_calculator_resource_guards`（7 条） |
+| 6 | **`tool_timeout` 对同步 handler 完全无效**（MED-HIGH） | 同步 handler 在事件循环里直接跑，`asyncio.wait_for` 永远等不到超时，还会阻塞**所有**会话 | 同步 handler 改为 `asyncio.to_thread` 执行（线程无法强杀，因此配合上一条的参数上限一起用） | `test_sync_handler_times_out`、`test_sync_handler_does_not_block_other_sessions` |
+| 7 | **轮次上限留下"悬空 tool_call"**（MEDIUM） | 被拒绝的调用先写进了 session，上下文里出现永不闭合的 `tool_call`（模型下一轮会重复调用），还被误计入「解析失败」提示 | 先判 `force_final` 再落库；拒绝次数用独立计数器 `max_limit_rejections` | `test_rejected_tool_call_is_not_persisted`、`test_turn_limit_does_not_report_parse_failure` |
+| 8 | **`config.max_tool_turns` 被 SessionManager 默认值覆盖**（MEDIUM） | 外部传入的 `SessionManager(max_turn=10)` 会悄悄压过配置里的 `max_tool_turns`，改配置毫无效果 | 优先级改为「显式参数 > session 显式覆盖值 > config」，新增 `Session.max_turn_override` 表达"显式覆盖" | `test_config_max_tool_turns_is_respected_with_default_session_manager` |
+| 9 | **非 answer 退出时 `turns_used` 恒为 0**（MEDIUM） | CLI/demo 显示「轮次: 0」，明明跑了 10 轮工具 | `_finish()` 统一写入 `turns_used`，所有退出路径一致 | `test_turns_used_reported_on_all_exit_paths` |
+| 10 | **`Tracer.in_memory()` 往 CWD 写日志**（MEDIUM） | docstring 写「不落盘」，实际每个 run 都在当前目录生成 `run_*.log`（我的仓库里被塞了 472 个），还每次泄漏一个文件句柄、事件无限增长 | `trace_dir` 为空时直接跳过落盘；`run_end` 时关闭句柄；事件改用有界 `deque(maxlen=N)` | `test_in_memory_tracer_writes_nothing`、`test_real_tracer_closes_run_file_after_run_end`、`test_tracer_events_are_bounded` |
+| 11 | **宽松回退被引号/花括号打败**（MEDIUM） | 「他说 "hello" 然后走了。」被判成坏 JSON → 重试 4 次后用户收到「抱歉，我没能输出符合协议的格式」，而**答案本来就在手上** | 判据改为「以 `{`/`[` 开头」或「JSON 结构 + 协议词汇」才视为 JSON 意图；纯自然语言一律走回退 | `test_prose_with_quotes_and_braces_is_still_an_answer` |
+| 12 | **异常没有 traceback**（MEDIUM） | 内部异常被兜底吞掉后只留一行 message，线上无法定位；`Tracer.log_exception` 也只存类型+消息 | `log_exception` 记录 `traceback.format_exc()`；配置项 `check()` 也不再对内置 provider 误报「缺少 base_url」 | `test_tracer_exception_records_traceback` |
+
+> 这一轮最有价值的收获：**「测试全绿」和「功能正确」是两件事**。
+> 缺陷 1/2/3/4 都属于"主流程看起来完全正常"的类型 —— 离线 mock 客户端照样能跑通 11 个用例，
+> 只有把「请求里到底发了什么 prompt」「handler 到底收到了什么参数」逐字打出来看，才会暴露。
+
+
 
 | # | 现象 | 解法 |
 | --- | --- | --- |
@@ -825,7 +854,7 @@ config = AgentConfig.from_env(tool_deps={"search_api": RealSearchAPI()})
 
 ```
 minimal-agent/
-├── miniagent/                    # 核心运行时（≈3550 行有效代码）
+├── miniagent/                    # 核心运行时（≈3750 行有效代码）
 │   ├── __init__.py               #   对外 API 汇总
 │   ├── __main__.py               #   python -m miniagent 入口
 │   ├── agent.py                  #   ★ Agent 主循环（Step1~Step6 + 4 道护栏）
@@ -849,7 +878,7 @@ minimal-agent/
 │       └── weather.py            #   mock 天气（确定性）
 ├── prompts/
 │   └── system_prompt.md          # ★ System Prompt（JSON 协议 + 工具列表占位符）
-├── tests/                        # 自动化测试（≈1900 行有效代码，208 个用例）
+├── tests/                        # 自动化测试（≈2250 行有效代码，252 个用例）
 │   ├── run_all.py                #   零依赖测试运行器（无 pytest 也能跑）
 │   ├── conftest.py
 │   ├── test_agent_cases.py       #   7 个验收用例 + 护栏
@@ -858,6 +887,7 @@ minimal-agent/
 │   ├── test_session_context.py   #   隔离 / 裁剪 / 渲染
 │   ├── test_llm_client.py        #   HTTP 层 / 剧本客户端
 │   ├── test_edge_cases.py        #   并发 / 特殊字符 / 多实例 / 协议边界
+│   ├── test_review_regressions.py#   代码评审缺陷的回归测试（41 条）
 │   ├── test_observability.py     #   trace / prompt / config
 │   ├── test_cli_and_demo.py      #   CLI / demo 端到端
 │   └── test_examples.py          #   示例不腐烂

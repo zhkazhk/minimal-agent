@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, Union
@@ -61,6 +62,48 @@ class Tool:
             raise ValueError(f"工具 `{self.name}` 的 parameters 必须是 type=object 的 JSON Schema")
         if not callable(self.handler):
             raise ValueError(f"工具 `{self.name}` 的 handler 必须可调用（同步/async 均可）")
+
+    def _detect_ctx_param(self) -> bool:
+        """handler 是否声明了上下文形参（声明了才注入 ToolContext）。
+
+        兼容 `ctx` / `context` / `tool_ctx` 三种命名，且支持位置参数写法
+        `def handler(query, ctx)`。
+        """
+        try:
+            params = inspect.signature(self.handler).parameters
+        except (TypeError, ValueError):  # 内置函数等拿不到签名
+            return False
+        for candidate in ("ctx", "context", "tool_ctx"):
+            if candidate in params:
+                return True
+        positional = [
+            name
+            for name, param in params.items()
+            if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        ]
+        return len(positional) >= 2 and positional[1] in ("ctx", "context", "tool_ctx")
+
+    def ctx_param_name(self) -> Optional[str]:
+        """返回 handler 声明的上下文形参名（没声明则 None）——注入时必须用这个名字。"""
+        try:
+            params = inspect.signature(self.handler).parameters
+        except (TypeError, ValueError):
+            return None
+        for candidate in ("ctx", "context", "tool_ctx"):
+            if candidate in params:
+                return candidate
+        positional = [
+            name
+            for name, param in params.items()
+            if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        ]
+        if len(positional) >= 2 and positional[1] in ("ctx", "context", "tool_ctx"):
+            return positional[1]
+        return None
+
+    @property
+    def accepts_ctx(self) -> bool:
+        return self.ctx_param_name() is not None
 
     def to_schema(self) -> dict[str, Any]:
         """给 LLM 看的工具描述（会写进 system prompt，也会作为 trace 的元信息）。"""
@@ -157,16 +200,23 @@ class ToolRegistry:
     async def execute(self, name: str, arguments: Any, ctx: Optional[ToolContext] = None) -> str:
         """参数校验 → 执行 → 结果字符串化。
 
-        异常全部转成 `MiniAgentError` 子类，由 Agent 主循环决定怎么回灌给 LLM。
+        - 声明了 `ctx` 形参的 handler 会拿到 `ToolContext`（会话 / trace / 依赖注入）；
+        - **同步 handler 放进线程池执行**：否则会阻塞事件循环，让 Agent 的
+          `tool_timeout` 形同虚设（详见 README「工具超时」一节）；
+        - 异常全部转成 `MiniAgentError` 子类，由 Agent 主循环决定怎么回灌给 LLM。
         """
         tool = self.get(name)
         args = validate_arguments(tool.parameters, arguments, tool_name=name)
         ctx = ctx or ToolContext()
+        ctx_name = tool.ctx_param_name()
+        if ctx_name:
+            args = {**args, ctx_name: ctx}
         try:
             if tool.is_async:
                 result = await tool.handler(**args)
             else:
-                result = tool.handler(**args)
+                # 同步 handler 丢到线程池：事件循环保持可响应，wait_for 才能真正生效
+                result = await asyncio.to_thread(tool.handler, **args)
                 if inspect.isawaitable(result):
                     result = await result
         except (ToolNotFoundError, ToolExecutionError):
@@ -174,7 +224,7 @@ class ToolRegistry:
         except Exception as exc:  # noqa: BLE001 - 工具内部任何异常都要变成可回灌文本
             raise ToolExecutionError(
                 f"工具 `{name}` 执行失败: {type(exc).__name__}: {exc}",
-                detail={"arguments": args},
+                detail={"arguments": {k: v for k, v in args.items() if k != ctx_name}},
             ) from exc
         return normalize_result(result)
 
