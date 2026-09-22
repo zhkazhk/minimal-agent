@@ -10,9 +10,9 @@
 | 提交要求 | 交付位置 | 一句话说明 |
 | --- | --- | --- |
 | **① 使用真实的 LLM API** | `scripts/verify_real_llm.py` + `docs/evidence/real_llm_*.md` | DeepSeek `deepseek-flash`（OpenAI 兼容端点）；10 项端到端验证 **10/10 通过** |
-| **② 代码链接** | https://github.com/zhkazhk/minimal-agent | 公开仓库，`main` 分支；50 个文件、13 个 commit |
-| **③ README** | [`README.md`](../README.md) | 1038 行：运行方式 / 系统设计 / Session / Context / **Memory 召回时机与放置方式** / 工具扩展 / 问题记录 |
-| **④ AI Prompt 与问题解决记录** | `prompts/system_prompt.md` + [`README.md` §14](../README.md#14-问题记录开发踩坑) + `docs/evidence/system_prompt.md` | Prompt 模板（受版本控制）+ 运行时渲染实证；问题记录共 5 大类 35 条 + 代码评审 12 条缺陷 |
+| **② 代码链接** | https://github.com/zhkazhk/minimal-agent | 公开仓库，`main` 分支；56 个文件、14 个 commit |
+| **③ README** | [`README.md`](../README.md) | 1042 行：运行方式 / 系统设计 / Session / Context / **Memory 召回时机与放置方式** / 工具扩展 / 问题记录 |
+| **④ AI Prompt 与问题解决记录** | `prompts/system_prompt.md` + [`README.md` §14](../README.md#14-问题记录开发踩坑) + `docs/evidence/system_prompt.md` | Prompt 模板（受版本控制）+ 运行时渲染实证；问题记录共 5 大类 31 条 + 代码评审 12 条缺陷 |
 
 ---
 
@@ -114,7 +114,7 @@ python scripts/verify_real_llm.py
 | --- | --- |
 | 可见性 | 公开 |
 | 默认分支 | `main` |
-| 文件数 | 50（含源码 23 个模块、测试 10 个模块、文档与脚本） |
+| 文件数 | 56（含源码 22 个模块、测试 10 个模块、文档与脚本） |
 | 运行期依赖 | **零**（纯 Python 标准库） |
 
 自带一条命令自检上传完整性（逐条对照交付要求核验远程真实内容，20/20 通过）：
@@ -127,7 +127,7 @@ python scripts/verify_github_upload.py
 
 ## ③ README
 
-**[`README.md`](../README.md)**（1038 行），目录：
+**[`README.md`](../README.md)**（1042 行），目录：
 
 | 章节 | 内容 | 交付要求对应 |
 | --- | --- | --- |
@@ -144,7 +144,7 @@ python scripts/verify_github_upload.py
 | §11 测试 | 253 个用例的分类与覆盖 | 测试用例 |
 | §12 工具扩展方式 | 3 步新增自定义工具 + 依赖注入 + 写 description 的经验 | **工具扩展** |
 | §13 配置项 | 全部环境变量 | 运行方式 |
-| §14 问题记录 | 5 大类 35 条踩坑 + 代码评审 12 条缺陷 | **问题解决记录** |
+| §14 问题记录 | 5 大类 31 条踩坑 + 代码评审 12 条缺陷 | **问题解决记录** |
 | §15 项目结构 | 带注释的文件树 | 系统设计 |
 | §16 已知限制与后续 | 7 条限制 + 6 条规划 | 系统设计 |
 
