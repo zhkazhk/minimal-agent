@@ -30,8 +30,9 @@ dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "httpx>=0.27", "jsonschema>=4.20"]
 miniagent = "miniagent.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/your-name/minimal-agent"
-Repository = "https://github.com/your-name/minimal-agent"
+Homepage = "https://github.com/zhkazhk/minimal-agent"
+Repository = "https://github.com/zhkazhk/minimal-agent"
+Issues = "https://github.com/zhkazhk/minimal-agent/issues"
 
 [tool.setuptools]
 packages = ["miniagent", "miniagent.llm", "miniagent.tools"]

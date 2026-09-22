@@ -52,7 +52,7 @@
 ### 1.1 零配置跑通（不需要 API Key）
 
 ```bash
-git clone <your-repo-url> minimal-agent
+git clone https://github.com/zhkazhk/minimal-agent.git
 cd minimal-agent
 
 # 跑一遍 11 个验收用例（离线规则客户端，结果确定性可复现）
