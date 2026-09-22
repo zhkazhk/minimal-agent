@@ -184,10 +184,18 @@ def main(argv: list[str]) -> int:
         return 2
     url = positional[0].strip()
 
+    # 常见手滑：把文档里的占位符尖括号一起复制进来（https://github.com/<用户名>/<仓库>.git）。
+    # 这不是错误用法，直接剥掉即可，别让用户白跑一趟。
+    if "<" in url or ">" in url:
+        cleaned = url.replace("<", "").replace(">", "")
+        print(f"ℹ 检测到 URL 里带了占位符尖括号，已自动去除：\n   {url}\n→  {cleaned}\n")
+        url = cleaned
+
     if not any(pattern.match(url) for pattern in URL_PATTERNS):
         return fail(
             f"远程地址看起来不是 GitHub 仓库：{url}\n"
-            "   期望形如 https://github.com/<用户名>/<仓库名>.git"
+            "   期望形如 https://github.com/<用户名>/<仓库名>.git\n"
+            "   （注意：< > 只是文档里的占位符标记，实际命令里不要写）"
         )
 
     # ---------- 1. 安全检查：绝不能把密钥推上去 ----------
