@@ -20,9 +20,20 @@ env/
 htmlcov/
 
 # ---- 环境与密钥 ----
+# 任何形式的密钥文件都不进版本库；.env.example 是唯一例外（里面只有占位符）
 .env
 .env.*
 !.env.example
+# 密钥投放区：只保留说明文件，其余一律忽略
+.inbox/*
+!.inbox/README.md
+*.key
+*.pem
+*secret*
+*credential*
+key*.txt
+key*.json
+api_key*
 
 # ---- 编辑器 / 系统 ----
 .vscode/

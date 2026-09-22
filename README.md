@@ -111,6 +111,15 @@ MINIAGENT_API_KEY=sk-xxxxxxxx
 MINIAGENT_MODEL=deepseek-chat
 ```
 
+> **不方便手写 `.env`？** 仓库里带了一个安全导入脚本，支持 `.env` / 纯 key / JSON 三种格式：
+>
+> ```bash
+> python scripts/import_key.py /path/to/your-key-file
+> ```
+>
+> 它只写入 `.env`（已被 `.gitignore` 忽略，脚本会再跑一次 `git check-ignore` 复核），
+> 并且**只回显密钥的前 4 位与长度**，不会把完整密钥打印到终端或日志里。
+
 然后：
 
 ```bash
