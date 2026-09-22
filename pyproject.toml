@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minimal-agent"
+version = "1.0.0"
+description = "不用任何 Agent 框架，从零手写的最小可用 Agent Runtime（Session 隔离 / 上下文压缩 / 工具注册 / JSON 协议解析 / Trace 日志）"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "minimal-agent" }]
+keywords = ["agent", "llm", "llm-agent", "tool-calling", "from-scratch", "no-framework"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# 运行期零依赖：只用标准库（urllib / asyncio / json / ast / dataclasses）
+dependencies = []
+
+[project.optional-dependencies]
+# 可选加速/增强，不装也能跑
+httpx = ["httpx>=0.27"]
+aiohttp = ["aiohttp>=3.9"]
+schema = ["jsonschema>=4.20"]
+dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "httpx>=0.27", "jsonschema>=4.20"]
+
+[project.scripts]
+miniagent = "miniagent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/your-name/minimal-agent"
+Repository = "https://github.com/your-name/minimal-agent"
+
+[tool.setuptools]
+packages = ["miniagent", "miniagent.llm", "miniagent.tools"]
+
+[tool.setuptools.package-data]
+miniagent = ["../prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
