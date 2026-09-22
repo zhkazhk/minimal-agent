@@ -102,6 +102,37 @@ def probe(proxy: str | None, timeout: int = PROBE_TIMEOUT) -> bool:
         return False
 
 
+def ensure_credential_helper() -> None:
+    """确保有一个**非交互式可用**的凭据助手。
+
+    常见坑：PortableGit 的 system 配置把 helper 设成 `helper-selector`
+    （要求你在 GUI 里点选助手的交互式程序）。在没有终端的自动化环境里它直接失败：
+    `fatal: could not read Username for 'https://github.com'`。
+    检测到这种情况就自动切到 `manager`（Git Credential Manager）或 `wincred`。
+    """
+    current = (git("config", "--system", "--get", "credential.helper", check=False).stdout or "").strip()
+    global_helper = (git("config", "--global", "--get", "credential.helper", check=False).stdout or "").strip()
+    if global_helper and global_helper not in ("helper-selector",):
+        print(f"   凭据助手：{global_helper}（global 配置）")
+        return
+
+    exec_path = git("--exec-path", check=False).stdout.strip()
+    git_root = os.path.dirname(os.path.dirname(os.path.dirname(exec_path))) if exec_path else ""
+    candidates = [
+        os.path.join(git_root, "mingw64", "bin", "git-credential-manager.exe") if git_root else "",
+        os.path.join(git_root, "mingw64", "bin", "git-credential-wincred.exe") if git_root else "",
+        r"C:\Program Files\Git\mingw64\bin\git-credential-manager.exe",
+    ]
+    for exe in candidates:
+        if not exe or not os.path.isfile(exe):
+            continue
+        helper = "manager" if "manager" in os.path.basename(exe) else "wincred"
+        git("config", "--global", "credential.helper", helper)
+        print(f"   凭据助手：{helper}（已写入 global 配置，替代不可用的 '{current or 'helper-selector'}'）")
+        return
+    print(f"   ⚠ 未找到可用凭据助手（当前 system 配置为 '{current}'），推送可能因读不到用户名而失败")
+
+
 def find_working_proxy(explicit: str | None) -> tuple[str | None, str]:
     """返回 (代理地址或 None, 说明)。按「越明确的候选越先试」的顺序，避免长时间卡住。"""
     if explicit:
@@ -199,6 +230,9 @@ def main(argv: list[str]) -> int:
         print("     3) 若你的网络本来就能直连（海外机器），加 --no-proxy 跳过探测")
         return 1
     print(f"   ✅ 链路可用（{reason}）：{proxy or '直连'}")
+
+    print("\n凭据检查：")
+    ensure_credential_helper()
 
     # ---------- 4. 设置远程 ----------
     existing = git("remote", "get-url", "origin", check=False).stdout.strip()
