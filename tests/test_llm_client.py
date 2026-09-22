@@ -192,10 +192,21 @@ def test_empty_content_raises() -> None:
     assert "空内容" in str(excinfo.value)
 
 
-def test_missing_base_url_raises_clearly() -> None:
+def test_missing_base_url_raises_clearly(monkeypatch) -> None:
+    # 注意：客户端会回退到 provider 的内置默认地址，所以必须同时清掉环境变量与 provider 默认值，
+    # 才能真正走到"缺少 base_url"这条分支。
+    monkeypatch.delenv("MINIAGENT_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     with pytest.raises(LLMError) as excinfo:
         OpenAICompatibleClient(base_url="", provider="unknown-provider", api_key="x")
     assert "base_url" in str(excinfo.value)
+
+
+def test_provider_default_base_url_used_when_env_empty(monkeypatch) -> None:
+    """环境变量给了空串时应回退到 provider 默认地址（而不是报错）。"""
+    monkeypatch.setenv("MINIAGENT_BASE_URL", "")
+    client = OpenAICompatibleClient(provider="deepseek", api_key="x")
+    assert client.base_url == "https://api.deepseek.com/v1"
 
 
 def test_provider_default_base_url(monkeypatch) -> None:

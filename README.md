@@ -179,6 +179,34 @@ asyncio.run(main())
 
 > 默认走标准库 `urllib`（放进线程池执行），因此在**完全离线的环境**里也能 import、能跑 demo、能跑测试。
 
+### 1.5 真实 LLM 端到端验证
+
+离线用例验证的是「框架逻辑」；接上真实模型后，用 `scripts/verify_real_llm.py` 再验一遍端到端链路：
+
+```bash
+python scripts/verify_real_llm.py     # 需要先配好 .env
+```
+
+**实测结果（DeepSeek `deepseek-flash`，10/10 通过，总耗时 27.9s）**：
+
+| # | 验证项 | 实测 |
+| --- | --- | --- |
+| 1 | calculator 工具调用 | 模型按协议输出 `{"expression":"123+456*7"}` → `3315`（**没有自己心算**） |
+| 2 | weather 工具调用 | 正确选到 weather 工具，参数 `{city: 上海, date: 今天, unit: celsius}` |
+| 3 | 追问指代消解 | 「明天呢」→ 自动沿用 `city: 上海` 并把 `date` 切成 `明天` |
+| 4 | 多窗口隔离 | win1 只出现 weather、win2 只出现 calculator，交叉污染=无 |
+| 5 | 该直接回答时不调工具 | 0 次工具调用，直接给答案，`stop=answer` |
+| 6 | 参数校验（模型一次填对） | `strict_echo(text, mode)` 参数全对，无 error 回灌 |
+| 6b | 带约束参数抽取（`minLength=6`） | 从自然语言里正确抽出 `report_name=月度总结`、`access_code=ABC123XYZ` |
+| 6c | **工具执行期报错 → 回灌 → 可读交代** | `10/0` 触发 `ZeroDivisionError` → 错误进上下文 → 模型回答「除数不能为零」 |
+| 7 | 轮次上限强制收敛 | `max_tool_turns=1` 时只执行 1 次工具，并如实说明哪些没做完 |
+| 8 | 多轮触发上下文裁剪 | session 20 条消息 → 请求侧裁剪 7 次、累计丢弃 63 条，对话仍正常 |
+
+> 有意思的一点：我们**试图**让真实模型首轮填错参数来验证"自修正"链路，
+> 试了「漏必填字段」（它用空串凑数）和「加 `minLength` 约束」（它照样填对）两种套路，
+> `deepseek-flash` 每次都能一次通过 —— 所以这条链路的确定性覆盖放在离线剧本用例里
+> （`test_case6_schema_violation_caught_then_retried`），真实模型侧改为验证"执行期报错"（6c）。
+
 ---
 
 ## 2. 系统架构
