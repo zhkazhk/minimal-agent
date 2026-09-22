@@ -19,8 +19,8 @@
 | --- | --- |
 | 语言 / 版本 | Python 3.9+（开发验证于 3.13.14 / Windows） |
 | 运行期依赖 | **无**（`urllib` + `asyncio`；可选 `httpx` / `aiohttp` / `jsonschema`） |
-| 代码规模 | 约 8100 行（核心运行时代码 ≈ 3100 行，测试 ≈ 2300 行，示例/Demo ≈ 700 行） |
-| 自动化测试 | **189 passed / 0 failed**（7 个测试模块，含 11 个端到端验收用例） |
+| 代码规模 | 约 9300 行（含注释/文档串）；其中**有效代码约 6000 行**：核心运行时 ≈3550 行，测试 ≈1900 行，示例/Demo ≈600 行 |
+| 自动化测试 | **208 passed / 0 failed**（9 个测试模块，含 11 个端到端验收用例） |
 | 验收用例 | **11 / 11 通过**（交付要求 7 个必测 + 4 个补充护栏用例） |
 | LLM 接口 | 任意 OpenAI 兼容端点（DeepSeek / OpenAI / 通义 / Moonshot / vLLM / Ollama…） |
 
@@ -634,19 +634,20 @@ python tests/run_all.py test_parser     # 只跑解析器测试
 pytest -q
 ```
 
-实测结果：**189 passed / 0 failed**。
+实测结果：**208 passed / 0 failed**。
 
 | 测试模块 | 用例数 | 覆盖内容 |
 | --- | --- | --- |
 | `test_agent_cases.py` | 32 | 7 个验收用例 + 护栏（轮次上限 / 重复调用 / 解析失败 / LLM 异常 / 工具超时 / 并发多窗口）+ 自定义工具端到端 |
 | `test_tools.py` | 42 | 注册/注销、参数校验、calculator 安全边界（11 条注入用例）、search/weather 确定性 |
 | `test_parser.py` | 29 | JSON 提取、脏数据修复（全角/单引号/尾随逗号/截断/无引号 key）、协议与 schema 校验、错误信息质量 |
-| `test_llm_client.py` | 31 | 多厂商响应解析、重试与快速失败、**注入假传输层**测试 HTTP 行为、剧本/离线客户端 |
+| `test_llm_client.py` | 34 | 多厂商响应解析、重试与快速失败、**注入假传输层**测试 HTTP 行为、采样参数回退、剧本/离线客户端 |
 | `test_session_context.py` | 23 | 窗口隔离、存储落盘、双阈值裁剪、边界清理、渲染协议、轮次规则 |
+| `test_edge_cases.py` | 19 | 并发同 session、8 窗口并行隔离、特殊字符往返、超大工具结果、多轮混合追问、多 JSON 对象、多实例共享 Session、极小上下文预算 |
 | `test_observability.py` | 17 | trace 落盘、事件过滤、统计、字段截断、Prompt 渲染、Config 校验 |
 | `test_examples.py` | 8 | 示例脚本不腐烂 |
 | `test_cli_and_demo.py` | 7 | CLI 各子命令、`python -m miniagent demo` 子进程端到端 |
-| **合计** | **189** | |
+| **合计** | **208** | |
 
 测试设计上值得一提的两点：
 
@@ -774,6 +775,9 @@ config = AgentConfig.from_env(tool_deps={"search_api": RealSearchAPI()})
 | 6 | `arguments` 被序列化成字符串 | 少数模型的输出习惯 | 检测到字符串时二次 `json.loads` | `test_arguments_as_json_string` |
 | 7 | 模型直接说人话（完全没 JSON） | 不守协议 | 宽松模式下降级为 `answer`；但用「花括号不配对 / 出现 JSON 结构字符 / 提到协议关键字」区分「说人话」与「JSON 写坏了」，后者必须报错回灌 | `test_plain_text_falls_back_to_answer`、`test_half_json_is_not_treated_as_answer` |
 | 8 | 错误信息太笼统，模型改不对 | 早期无论什么错都报「格式不合法」 | 错误分级：**schema/协议错误优先抛出**，其次才是格式错误 | `test_missing_required_argument_raises`、`用例6` |
+| 9 | 模型一次吐出多个 JSON 对象 | 模型「自言自语」式重复输出 | 取**第一个合法**的并按它决策（第一个才是真实决策）；若第一个是 `answer` 就直接结束循环，不执行后面那个 `tool_call` | `test_multiple_json_objects_takes_the_first_valid_one` |
+| 10 | 用户直接粘贴一段 JSON 当输入 | 与协议文本长得像 | 用户消息原样进上下文，不参与协议解析（只有 **assistant** 输出才被 Parser 解析） | `test_user_input_with_json_like_text_is_not_confused` |
+| 11 | 换实例 / 进程重启后，省略式追问「明天呢」失去指代 | 决策状态只在内存里 | 从上下文历史重建状态（扫描历史中的 tool_call 还原城市等槽位） | `test_session_manager_reuse_across_agents` |
 
 ### 14.2 上下文膨胀
 
@@ -821,7 +825,7 @@ config = AgentConfig.from_env(tool_deps={"search_api": RealSearchAPI()})
 
 ```
 minimal-agent/
-├── miniagent/                    # 核心运行时（≈3100 行）
+├── miniagent/                    # 核心运行时（≈3550 行有效代码）
 │   ├── __init__.py               #   对外 API 汇总
 │   ├── __main__.py               #   python -m miniagent 入口
 │   ├── agent.py                  #   ★ Agent 主循环（Step1~Step6 + 4 道护栏）
@@ -845,7 +849,7 @@ minimal-agent/
 │       └── weather.py            #   mock 天气（确定性）
 ├── prompts/
 │   └── system_prompt.md          # ★ System Prompt（JSON 协议 + 工具列表占位符）
-├── tests/                        # 自动化测试（≈2300 行，189 个用例）
+├── tests/                        # 自动化测试（≈1900 行有效代码，208 个用例）
 │   ├── run_all.py                #   零依赖测试运行器（无 pytest 也能跑）
 │   ├── conftest.py
 │   ├── test_agent_cases.py       #   7 个验收用例 + 护栏
@@ -853,6 +857,7 @@ minimal-agent/
 │   ├── test_tools.py             #   工具注册 + 安全边界
 │   ├── test_session_context.py   #   隔离 / 裁剪 / 渲染
 │   ├── test_llm_client.py        #   HTTP 层 / 剧本客户端
+│   ├── test_edge_cases.py        #   并发 / 特殊字符 / 多实例 / 协议边界
 │   ├── test_observability.py     #   trace / prompt / config
 │   ├── test_cli_and_demo.py      #   CLI / demo 端到端
 │   └── test_examples.py          #   示例不腐烂

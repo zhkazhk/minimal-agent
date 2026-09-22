@@ -52,9 +52,8 @@
 ========================
 {{tools_json}}
 
-调用示例（仅供你理解格式，不要照抄内容）：
-{"type":"tool_call","tool_name":"calculator","arguments":{"expression":"123+456*7"}}
-{"type":"tool_call","tool_name":"weather","arguments":{"city":"上海","date":"今天"}}
+调用示例（仅供你理解格式，不要照抄内容；可用的工具名**以下方工具表为准**）：
+{"type":"tool_call","tool_name":"<工具表中的某个 name>","arguments":{<该工具的 schema 参数>}}
 {"type":"answer","content":"123+456*7 = 3315。"}
 
 ========================

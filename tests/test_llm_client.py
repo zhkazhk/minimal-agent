@@ -84,6 +84,30 @@ def test_endpoint_not_double_suffixed() -> None:
     assert client.endpoint == "https://example.com/v1/chat/completions"
 
 
+def test_request_none_sampling_uses_client_defaults() -> None:
+    """请求未显式指定采样参数时，必须回退到客户端配置（None 语义）。"""
+    client = _client(temperature=0.9, max_tokens=777)
+    payload = client.build_payload(LLMRequest(messages=[{"role": "user", "content": "hi"}]))
+    assert payload["temperature"] == 0.9
+    assert payload["max_tokens"] == 777
+
+
+def test_request_level_sampling_overrides_client() -> None:
+    client = _client(temperature=0.9, max_tokens=777)
+    payload = client.build_payload(
+        LLMRequest(messages=[{"role": "user", "content": "hi"}], temperature=0.1, max_tokens=32)
+    )
+    assert payload["temperature"] == 0.1
+    assert payload["max_tokens"] == 32
+
+
+def test_request_extra_overrides_extra_body() -> None:
+    client = _client(extra_body={"top_p": 0.9, "seed": 1})
+    payload = client.build_payload(LLMRequest(messages=[], extra={"seed": 42}))
+    assert payload["top_p"] == 0.9
+    assert payload["seed"] == 42
+
+
 def test_successful_call_via_injected_transport() -> None:
     calls: list[dict] = []
 

@@ -251,7 +251,35 @@ class OfflineMockClient(LLMClient):
 
     def state(self, request: LLMRequest) -> _SessionState:
         key = self.session_key(request)
-        return self._states.setdefault(key, _SessionState())
+        state = self._states.get(key)
+        if state is None:
+            state = _SessionState()
+            # 进程重启 / 换个实例（SessionStore 里已有历史）时，从上下文里重建状态，
+            # 这样「明天呢」这类省略式追问仍然能沿用上一轮的城市。
+            self._rehydrate(state, request.messages)
+            self._states[key] = state
+        return state
+
+    @staticmethod
+    def _rehydrate(state: "_SessionState", messages: Sequence[dict[str, str]]) -> None:
+        for msg in messages:
+            content = str(msg.get("content", ""))
+            if msg.get("role") == "assistant" and '"type"' in content and "tool_call" in content:
+                match = _TOOL_CALL_RE.search(content)
+                if not match:
+                    continue
+                name = match.group(1)
+                state.seen_tools.append(name)
+                try:
+                    arguments = json.loads(match.group(2))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(arguments, dict):
+                    state.pending_tool = name
+                    state.pending_arguments = arguments
+                    city = arguments.get("city")
+                    if isinstance(city, str) and city:
+                        state.last_city = city
 
     # ------------------------------------------------------------------ 主逻辑
     async def chat(self, request: LLMRequest) -> LLMResponse:
